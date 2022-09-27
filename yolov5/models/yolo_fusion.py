@@ -1,4 +1,5 @@
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
+
 """
 YOLO-specific modules
 
@@ -29,8 +30,6 @@ try:
     import thop  # for FLOPs computation
 except ImportError:
     thop = None
-
-LOGGER = logging.getLogger(__name__)
 
 
 class Detect(nn.Module):
