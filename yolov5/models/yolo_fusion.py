@@ -149,7 +149,7 @@ class FusionModel(nn.Module):
 
         # Run backbone for RGB and point cloud specific
         for i, m in enumerate(self.backbone_rgb):
-            if i <= 5:
+            if i <= 3:
                 if m.f != -1:  # if not from previous layer
                     x_rgb = y_rgb[m.f] if isinstance(m.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m.f]  # from earlier layers
                 if profile:
@@ -162,7 +162,7 @@ class FusionModel(nn.Module):
                 break
         
         for i, m in enumerate(self.backbone_pc):
-            if i <= 5:
+            if i <= 3:
                 if m.f != -1:  # if not from previous layer
                     x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
                 x_pc = m(x_pc)
@@ -171,10 +171,10 @@ class FusionModel(nn.Module):
                 break
                
         x = torch.cat((x_rgb, x_pc), dim=1)
-        x = self.dimension_reducer5(x)
+        x = self.dimension_reducer3(x)
 
         for i, m in enumerate(self.backbone_rgb):
-            if i <= 5:
+            if i <= 3:
                 continue
             else:
                 if m.f != -1:  # if not from previous layer
