@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import sys
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -101,12 +102,13 @@ class FusionModel(nn.Module):
         self.backbone_pc = deepcopy(self.backbone_rgb)
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         self.inplace = self.yaml.get('inplace', True)
-        
+       
+        #print(self.backbone_rgb)
         last_backbone_index = len(self.backbone_rgb)-1
-        self.dimension_reducer4 = nn.Conv2d(model_ch[4]*2, model_ch[4], kernel_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer6 = nn.Conv2d(model_ch[6]*2, model_ch[6], kernel_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer8 = nn.Conv2d(model_ch[8]*2, model_ch[8], kernel_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer11 = nn.Conv2d(model_ch[last_backbone_index]*2, model_ch[last_backbone_index], kernel_size=1, stride=1, padding=0, bias=False)
+        self.dimension_reducer1 = nn.Conv2d(model_ch[1]*2, model_ch[1], kerner_size=1, stride=1, padding=0, bias=False)
+        self.dimension_reducer3 = nn.Conv2d(model_ch[3]*2, model_ch[3], kernel_size=1, stride=1, padding=0, bias=False)
+        self.dimension_reducer5 = nn.Conv2d(model_ch[5]*2, model_ch[5], kernel_size=1, stride=1, padding=0, bias=False)
+        self.dimension_reducer7 = nn.Conv2d(model_ch[7]*2, model_ch[7], kernel_size=1, stride=1, padding=0, bias=False)
 
         # Build strides, anchors
         m = self.head[-1]  # Detect()
@@ -143,57 +145,48 @@ class FusionModel(nn.Module):
         return torch.cat(y, 1), None  # augmented inference, train
 
     def _forward_once(self, x_rgb, x_pc, profile=False, visualize=False):
-        y_rgb, y_pc, dt = [], [], []  # outputs
+        y, y_rgb, y_pc, dt = [], [], [], []  # outputs
 
-        # Run backbone for RGB and IR specific
-        for m in self.backbone_rgb:
-            if m.f != -1:  # if not from previous layer
-                x_rgb = y_rgb[m.f] if isinstance(m.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m.f]  # from earlier layers
-            if profile:
-                self._profile_one_layer(m, x_rgb, dt)
-            x_rgb = m(x_rgb)  # run
-            y_rgb.append(x_rgb if m.i in self.save else None)  # save output
-            if visualize:
-                feature_visualization(x_rgb, m.type, m.i, save_dir=visualize)
+        # Run backbone for RGB and point cloud specific
+        for i, m in enumerate(self.backbone_rgb):
+            if i <= 5:
+                if m.f != -1:  # if not from previous layer
+                    x_rgb = y_rgb[m.f] if isinstance(m.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m.f]  # from earlier layers
+                if profile:
+                    self._profile_one_layer(m, x_rgb, dt)
+                x_rgb = m(x_rgb)  # run
+                y_rgb.append(x_rgb if m.i in self.save else None)  # save output
+                if visualize:
+                    feature_visualization(x_rgb, m.type, m.i, save_dir=visualize)
+            else:
+                break
         
-        for m in self.backbone_pc:
-            if m.f != -1:  # if not from previous layer
-                x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
-            x_pc = m(x_pc)
-            y_pc.append(x_pc if m.i in self.save else None)  # save output
-
-        y = []
-        # Run fusion layer on all saved 
-        for i, (xi_rgb, xi_pc) in enumerate(zip(y_rgb, y_pc)):
-            if (xi_rgb == None or xi_pc == None):
-                y.append(None)
-                continue
-            xi = torch.cat((xi_rgb, xi_pc), dim=1)
-            if i == 4:
-                xi = self.dimension_reducer4(xi)
-            if i == 6:
-                xi = self.dimension_reducer6(xi)
-            if i == 8:
-                xi = self.dimension_reducer8(xi)
-            y.append(xi)
-
-
-        # Run fusion layer on most recent x
+        for i, m in enumerate(self.backbone_pc):
+            if i <= 5:
+                if m.f != -1:  # if not from previous layer
+                    x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
+                x_pc = m(x_pc)
+                y_pc.append(x_pc if m.i in self.save else None)  # save output
+            else:
+                break
+               
         x = torch.cat((x_rgb, x_pc), dim=1)
-        x = self.dimension_reducer11(x)
+        x = self.dimension_reducer5(x)
 
-        # Run through head
-        for m in self.head:
-            # print('f: ', m.f)
-            # print('type: ', m.type)
+        for i, m in enumerate(self.backbone_rgb):
+            if i <= 5:
+                continue
+            else:
+                if m.f != -1:  # if not from previous layer
+                    x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+                x = m(x)
+                y.append(x if m.i in self.save else None)  # save output
 
+        for i, m in enumerate(self.head):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-                
             if profile:
                 self._profile_one_layer(m, x, dt)
-            # print('save: ', self.save)
-            # print('y: ', len(y))
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
