@@ -150,7 +150,7 @@ class FusionModel(nn.Module):
                 x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
             x_pc = m(x_pc)  # run
             y_pc.append(x if m.i in self.save else None)  # save output
-            i = fuse_layer
+            fuse_layer = i
         
         for i, m in enumerate(self.backbone_rgb):
             if i < fuse_layer:
