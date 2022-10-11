@@ -1,5 +1,4 @@
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
-
 """
 YOLO-specific modules
 
@@ -9,7 +8,6 @@ Usage:
 
 import argparse
 import sys
-import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -31,6 +29,8 @@ try:
     import thop  # for FLOPs computation
 except ImportError:
     thop = None
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Detect(nn.Module):
@@ -80,7 +80,7 @@ class Detect(nn.Module):
 
 
 class FusionModel(nn.Module):
-    def __init__(self, cfg='models/yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
+    def __init__(self, cfg='models/yolov5s.yaml', ch=4, nc=None, anchors=None):  # model, input channels, number of classes
         super().__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
@@ -98,24 +98,18 @@ class FusionModel(nn.Module):
         if anchors:
             LOGGER.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
-        self.backbone_rgb, self.head, self.save, model_ch = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
-        self.backbone_pc = deepcopy(self.backbone_rgb)
+        self.backbone_rgb, backbone_pc, self.head, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         self.inplace = self.yaml.get('inplace', True)
-       
-        #print(self.backbone_rgb)
-        last_backbone_index = len(self.backbone_rgb)-1
-        self.dimension_reducer1 = nn.Conv2d(model_ch[1]*2, model_ch[1], kerner_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer3 = nn.Conv2d(model_ch[3]*2, model_ch[3], kernel_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer5 = nn.Conv2d(model_ch[5]*2, model_ch[5], kernel_size=1, stride=1, padding=0, bias=False)
-        self.dimension_reducer7 = nn.Conv2d(model_ch[7]*2, model_ch[7], kernel_size=1, stride=1, padding=0, bias=False)
+
+        self.reduce_channels = torch.nn.Conv2d(3, 1, 1)
 
         # Build strides, anchors
         m = self.head[-1]  # Detect()
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.inplace = self.inplace
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s), torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, 3, s, s), torch.zeros(1, 3, s, s))])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -124,11 +118,11 @@ class FusionModel(nn.Module):
         # Init weights, biases
         initialize_weights(self)
         self.info()
-        LOGGER.info('SETUP COMPLETE')
+        LOGGER.info('')
 
     def forward(self, x_rgb, x_pc, augment=False, profile=False, visualize=False):
         if augment:
-            return self._forward_augment(x_rgb) #, x_pc  # augmented inference, None
+            return self._forward_augment(x_rgb) 
         return self._forward_once(x_rgb, x_pc, profile, visualize)  # single-scale inference, train
 
     def _forward_augment(self, x):
@@ -145,44 +139,34 @@ class FusionModel(nn.Module):
         return torch.cat(y, 1), None  # augmented inference, train
 
     def _forward_once(self, x_rgb, x_pc, profile=False, visualize=False):
-        y, y_rgb, y_pc, dt = [], [], [], []  # outputs
+        x = []
+        y, y_pc, y_rgb, dt = [], [], [], []  # outputs
 
-        # Run backbone for RGB and point cloud specific
+        x_pc = self.reduce_channels(x_pc)
+
+        fuse_layer = 0
+        for i, m in enumerate(self.backbone_pc):
+            if m.f != -1:  # if not from previous layer
+                x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
+            x_pc = m(x_pc)  # run
+            y_pc.append(x if m.i in self.save else None)  # save output
+            i = fuse_layer
+        
         for i, m in enumerate(self.backbone_rgb):
-            if i <= 3:
+            if i < fuse_layer:
                 if m.f != -1:  # if not from previous layer
                     x_rgb = y_rgb[m.f] if isinstance(m.f, int) else [x_rgb if j == -1 else y_rgb[j] for j in m.f]  # from earlier layers
-                if profile:
-                    self._profile_one_layer(m, x_rgb, dt)
                 x_rgb = m(x_rgb)  # run
-                y_rgb.append(x_rgb if m.i in self.save else None)  # save output
-                if visualize:
-                    feature_visualization(x_rgb, m.type, m.i, save_dir=visualize)
+                y_rgb.append(x if m.i in self.save else None)  # save output
             else:
-                break
-        
-        for i, m in enumerate(self.backbone_pc):
-            if i <= 3:
-                if m.f != -1:  # if not from previous layer
-                    x_pc = y_pc[m.f] if isinstance(m.f, int) else [x_pc if j == -1 else y_pc[j] for j in m.f]  # from earlier layers
-                x_pc = m(x_pc)
-                y_pc.append(x_pc if m.i in self.save else None)  # save output
-            else:
-                break
-               
-        x = torch.cat((x_rgb, x_pc), dim=1)
-        x = self.dimension_reducer3(x)
-
-        for i, m in enumerate(self.backbone_rgb):
-            if i <= 3:
-                continue
-            else:
+                if i == fuse_layer:
+                    x = torch.cat((x_rgb, x_pc), dim=1)
                 if m.f != -1:  # if not from previous layer
                     x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-                x = m(x)
+                x = m(x)  # run
                 y.append(x if m.i in self.save else None)  # save output
-
-        for i, m in enumerate(self.head):
+                  
+        for m in self.head:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
@@ -244,10 +228,10 @@ class FusionModel(nn.Module):
     #     for m in self.model.modules():
     #         if type(m) is Bottleneck:
     #             LOGGER.info('%10.3g' % (m.w.detach().sigmoid() * 2))  # shortcut weights
+
     def fuse(self):  # fuse model Conv2d() + BatchNorm2d() layers
         LOGGER.info('Fusing layers... ')
-        from itertools import chain
-        for m in chain(self.backbone_rgb.modules(), self.backbone_pc.modules(), self.head.modules()):
+        for m in self.model.modules():
             if isinstance(m, (Conv, DWConv)) and hasattr(m, 'bn'):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
@@ -271,8 +255,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
-    backbone, head, save, c2 = [], [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
+    backbone_rgb, backbone_pc, head, save, c2 = [], [], [], [], ch[-1]  # layers, savelist, ch out
+    for i, (f, n, m, args) in enumerate(d['backbone_rgb'] + d['head'] + d['backbone_pc']):  # from, number, module, args
         m = eval(m) if isinstance(m, str) else m  # eval strings
         for j, a in enumerate(args):
             try:
@@ -313,13 +297,15 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         LOGGER.info('%3s%18s%3s%10.0f  %-40s%-30s' % (i, f, n_, np, t, args))  # print
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
         if i < 10:
-            backbone.append(m_)
-        else: 
+            backbone_rgb.append(m_)
+        elif i < 24:
             head.append(m_)
+        else:
+            backbone_pc.append(m_)
         if i == 0:
             ch = []
         ch.append(c2)
-    return nn.Sequential(*backbone), nn.Sequential(*head), sorted(save), ch
+    return nn.Sequential(*backbone_rgb), nn.Sequential(*backbone_pc), nn.Sequential(*head), sorted(save)
 
 
 if __name__ == '__main__':

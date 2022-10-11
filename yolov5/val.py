@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 ROOT = ROOT.relative_to(Path.cwd())  # relative
 
 from models.experimental import attempt_load
-from utils.dataloaders import create_dataloader
+from utils.datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_img_size, check_requirements, \
     check_suffix, check_yaml, box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, \
     increment_path, colorstr, print_args
@@ -146,7 +146,7 @@ def run(data,
     # Dataloader
     if not training:
         if device.type != 'cpu':
-            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())), torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = task if task in ('train', 'val', 'test', 'klabo') else 'val'  # path to train/val/test images
         dataloader = create_dataloader(data[task], imgsz, batch_size, gs, single_cls, pad=0.5, rect=True,
                                        prefix=colorstr(f'{task}: '))[0]
@@ -159,21 +159,21 @@ def run(data,
     dt, p, r, f1, mp, mr, map50, map = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class = [], [], [], []
-    for batch_i, (img, pcs, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
+    for batch_i, (img, irs, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         t1 = time_sync()
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        pcs = pcs.to(device, non_blocking=True)
-        pcs = pcs.half() if half else pcs.float()  # uint8 to fp16/32
-        pcs /= 255.0  # 0 - 255 to 0.0 - 1.0
+        irs = irs.to(device, non_blocking=True)
+        irs = irs.half() if half else irs.float()  # uint8 to fp16/32
+        irs /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
         t2 = time_sync()
         dt[0] += t2 - t1
 
         # Run model
-        out, train_out = model(img, pcs, augment=augment)  # inference and training outputs
+        out, train_out = model(img, irs, augment=augment)  # inference and training outputs
         dt[1] += time_sync() - t2
 
         # Compute loss

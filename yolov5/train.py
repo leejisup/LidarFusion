@@ -1,4 +1,4 @@
-#YOLOv5 🚀 by Ultralytics, GPL-3.0 license
+# YOLOv5 🚀 by Ultralytics, GPL-3.0 license
 """
 Train a YOLOv5 model on a custom dataset
 
@@ -37,14 +37,14 @@ from models.experimental import attempt_load
 from models.yolo import Model
 from models.yolo_fusion import FusionModel
 from utils.autoanchor import check_anchors
-from utils.dataloaders import create_dataloader
-from utils.general import labels_to_class_weights, increment_path, intersect_dicts, labels_to_image_weights, init_seeds, \
+from utils.datasets import create_dataloader
+from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     strip_optimizer, get_latest_run, check_dataset, check_git_status, check_img_size, check_requirements, \
     check_file, check_yaml, check_suffix, print_args, print_mutation, set_logging, one_cycle, colorstr, methods
 from utils.downloads import attempt_download
 from utils.loss import ComputeLoss
 from utils.plots import plot_labels, plot_evolve
-from utils.torch_utils import EarlyStopping, ModelEMA, de_parallel, select_device, \
+from utils.torch_utils import EarlyStopping, ModelEMA, de_parallel, intersect_dicts, select_device, \
     torch_distributed_zero_first
 from utils.loggers.wandb.wandb_utils import check_wandb_resume
 from utils.metrics import fitness
@@ -66,6 +66,13 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
         opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
     
+    # TODO: Remove this
+    # cfg = 'models/hub/yolov5l6.yaml'
+    # batch_size = 1
+    # epochs = 1
+    # data = 'data/sheep.yaml'
+    # opt.cache = ''
+
     # Directories
     w = save_dir / 'weights'  # weights dir
     (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
@@ -85,16 +92,16 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     data_dict = None
 
     # Loggers
-    #if RANK in [-1, 0]:
-        #loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)  # loggers instance
-        #if loggers.wandb:
-        #    data_dict = loggers.wandb.data_dict
-        #    if resume:
-        #        weights, epochs, hyp = opt.weights, opt.epochs, opt.hyp
+    if RANK in [-1, 0]:
+        loggers = Loggers(save_dir, weights, opt, hyp, LOGGER)  # loggers instance
+        if loggers.wandb:
+            data_dict = loggers.wandb.data_dict
+            if resume:
+                weights, epochs, hyp = opt.weights, opt.epochs, opt.hyp
 
         # Register actions
-        #for k in methods(loggers):
-        #    callbacks.register_action(k, callback=getattr(loggers, k))
+        for k in methods(loggers):
+            callbacks.register_action(k, callback=getattr(loggers, k))
 
     # Config
     plots = not evolve  # create plots
@@ -193,7 +200,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # Image sizes
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.head[-1].nl  # number of detection layers (used for scaling hyp['obj'])
+    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
     imgsz = check_img_size(opt.imgsz, gs, floor=gs * 2)  # verify imgsz is gs-multiple
 
     # DP mode
@@ -288,10 +295,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, pcs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, irs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
-            pcs = pcs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            irs = irs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -311,11 +318,11 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 if sf != 1:
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
-                    pcs = nn.functional.interpolate(pcs, size=ns, mode='bilinear', align_corners=False)
+                    irs = nn.functional.interpolate(irs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs, pcs)  # forward
+                pred = model(imgs, irs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -340,7 +347,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 pbar.set_description(('%10s' * 2 + '%10.4g' * 5) % (
                     f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
-                callbacks.run('on_train_batch_end', ni, model, imgs, pcs, targets, paths, plots, opt.sync_bn)
+                callbacks.run('on_train_batch_end', ni, model, imgs, irs, targets, paths, plots, opt.sync_bn)
             # end batch ------------------------------------------------------------------------------------------------
 
         # Scheduler
@@ -379,7 +386,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                         'ema': deepcopy(ema.ema).half(),
                         'updates': ema.updates,
                         'optimizer': optimizer.state_dict(),
-                        'wandb_id': None}
+                        'wandb_id': loggers.wandb.wandb_run.id if loggers.wandb else None}
 
                 # Save last, best and delete
                 torch.save(ckpt, last)
@@ -475,8 +482,9 @@ def parse_opt(known=False):
 
 def main(opt, callbacks=Callbacks()):
     # Checks
+    set_logging(RANK)
     if RANK in [-1, 0]:
-        print_args(vars(opt))
+        print_args(FILE.stem, opt)
         check_git_status()
         check_requirements(exclude=['thop'])
 
